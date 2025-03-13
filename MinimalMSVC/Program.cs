@@ -1,13 +1,74 @@
-#nullable disable
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Text;
 using System.Text.Json.Nodes;
 using FlexPE;
+
+/********************************************************************************
+ * 
+ * Parse command line arguments
+ * 
+ ********************************************************************************/
+
+args ??= [];
+if (args.Any(t => t.Equals("-h", StringComparison.OrdinalIgnoreCase) || t.Equals("--help", StringComparison.OrdinalIgnoreCase))) {
+	Console.WriteLine("""
+		Usage: MinimalMSVC [-vsv=<version>] [-llvmv=<version>] [-vcv=<version>] [-winv=<version>] [-netv=<version>]
+			-vsv=<version> : Visual Studio version (default: latest)
+			-llvmv=<version> : LLVM version (default: latest)
+			-vcv=<version> : MSVC version (default: latest)
+			-winv=<version> : Windows SDK version (default: latest)
+			-netv=<version> : .NET Framework SDK version (default: latest)
+		
+		""");
+	return;
+}
+MyVersion? targetVsVer = null;
+MyVersion? targetLlvmSDKVer = null;
+MyVersion? targetMSVCSdkVer = null;
+MyVersion? targetWinSDKVer = null;
+MyVersion? targetNetFxSDKVer = null;
+foreach (var arg in args) {
+	if (arg.StartsWith("-vsv=", StringComparison.OrdinalIgnoreCase)) {
+		if (!MyVersion.TryParse(arg["-vsv=".Length..], out var ver))
+			throw new ArgumentException($"Invalid version: {arg["-vsv=".Length..]}");
+		targetVsVer = ver;
+	}
+	else if (arg.StartsWith("-llvmv=", StringComparison.OrdinalIgnoreCase)) {
+		if (!MyVersion.TryParse(arg["-llvmv=".Length..], out var ver))
+			throw new ArgumentException($"Invalid version: {arg["-llvmv=".Length..]}");
+		targetLlvmSDKVer = ver;
+	}
+	else if (arg.StartsWith("-vcv=", StringComparison.OrdinalIgnoreCase)) {
+		if (!MyVersion.TryParse(arg["-vcv=".Length..], out var ver))
+			throw new ArgumentException($"Invalid version: {arg["-vcv=".Length..]}");
+		targetMSVCSdkVer = ver;
+	}
+	else if (arg.StartsWith("-winv=", StringComparison.OrdinalIgnoreCase)) {
+		if (!MyVersion.TryParse(arg["-winv=".Length..], out var ver))
+			throw new ArgumentException($"Invalid version: {arg["-winv=".Length..]}");
+		targetWinSDKVer = ver;
+	}
+	else if (arg.StartsWith("-netv=", StringComparison.OrdinalIgnoreCase)) {
+		if (!MyVersion.TryParse(arg["-netv=".Length..], out var ver))
+			throw new ArgumentException($"Invalid version: {arg["-netv=".Length..]}");
+		targetNetFxSDKVer = ver;
+	}
+	else {
+		throw new ArgumentException($"Invalid argument: {arg}");
+	}
+}
+
+/********************************************************************************
+ * 
+ * Get Visual Studio, LLVM, MSVC, Windows SDK and .NET Framework SDK paths
+ * 
+ ********************************************************************************/
 
 var ProgramFilesX86Root = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
 var VsWherePath = Path.Combine(ProgramFilesX86Root, @"Microsoft Visual Studio\Installer\vswhere.exe");
@@ -16,24 +77,38 @@ var WindowsSDKRoot = Path.Combine(ProgramFilesX86Root, "Windows Kits");
 var NetFxSDKRoot = Path.Combine(ProgramFilesX86Root, @"Windows Kits\NETFXSDK");
 var LlvmSDKRoot = string.Empty;
 var MSVCSDKRoot = string.Empty;
-
-// Get installed Visual Studio and Windows SDK
-var vsProps = GetVsPropsList().OrderByDescending(t => Version.Parse((string)t["installationVersion"])).First();
-VsRoot = (string)vsProps["installationPath"];
-Console.WriteLine($"Found Visual Studio v{vsProps["installationVersion"]} at '{VsRoot}'.");
+var (vsVer, vsPath) = SelectVersion(GetVsInsts(), t => t.Ver, targetVsVer);
+VsRoot = vsPath;
+Console.WriteLine($"Found Visual Studio v{vsVer} at '{VsRoot}'.");
 LlvmSDKRoot = Path.Combine(VsRoot, @"VC\Tools\Llvm");
-var (llvmSDKVer, llvmSDKPath) = GetLlvmSDKs().OrderByDescending(t => t.Ver).First();
+var (llvmSDKVer, llvmSDKPath) = SelectVersion(GetLlvmSDKs(), t => t.Ver, targetLlvmSDKVer);
 Console.WriteLine($"Found LLVM Toolset v{llvmSDKVer} at '{llvmSDKPath}'.");
 MSVCSDKRoot = Path.Combine(VsRoot, @"VC\Tools\MSVC");
-var (msvcSDKVer, msvcSDKPath) = GetMSVCSDKs().OrderByDescending(t => t.Ver).First();
+var (msvcSDKVer, msvcSDKPath) = SelectVersion(GetMSVCSDKs(), t => t.Ver, targetMSVCSdkVer);
 Console.WriteLine($"Found MSVC Toolset v{msvcSDKVer} at '{msvcSDKPath}'.");
-var (winSDKVer, winSDKPath) = GetWinSDKs().OrderByDescending(t => t.Ver).First();
+var (winSDKVer, winSDKPath) = SelectVersion(GetWinSDKs(), t => t.Ver, targetWinSDKVer);
 Console.WriteLine($"Found Windows SDK v{winSDKVer} at '{winSDKPath}'.");
-var (netFxSDKVer, netFxSDKPath) = GetNetFxSDKs().OrderByDescending(t => t.Ver).First();
+var (netFxSDKVer, netFxSDKPath) = SelectVersion(GetNetFxSDKs(), t => t.Ver, targetNetFxSDKVer);
 Console.WriteLine($"Found .NET Framework SDK v{netFxSDKVer} at '{netFxSDKPath}'.");
 Console.WriteLine();
+T SelectVersion<T>(T[] values, Func<T, MyVersion> selector, MyVersion? targetVersion) {
+	if (values.Length == 0)
+		throw new InvalidOperationException("No installed version found.");
+	// 1. If the target version is not specified, return the latest version.
+	if (targetVersion is null)
+		return values.OrderByDescending(selector).First();
+	// 2. Return the version closest to and greater than or equal to the target version.
+	if (values.Where(t => selector(t).CompareTo(targetVersion) >= 0).OrderBy(selector).FirstOrDefault() is T result)
+		return result;
+	throw new InvalidOperationException("No matched version found.");
+}
 
-// Collect include files
+/********************************************************************************
+ * 
+ * Collect include files
+ * 
+ ********************************************************************************/
+
 var includeFiles = new List<MyFile>();
 var includeDirs = new List<MyFile>();
 CollectIncludeFiles(VsRoot, Path.Combine(llvmSDKPath, $@"lib\clang\{llvmSDKVer}\include"), false, true);
@@ -53,7 +128,12 @@ void CollectIncludeFiles(string baseDir, string dir, bool? isX64 = null, bool is
 }
 Console.WriteLine();
 
-// Collect lib files
+/********************************************************************************
+ * 
+ * Collect lib files
+ * 
+ ********************************************************************************/
+
 var libFiles = new List<MyFile>();
 var libDirs = new List<MyFile>();
 CollectLibFilesX86AndX64(VsRoot, Path.Combine(msvcSDKPath, "lib"));
@@ -74,7 +154,12 @@ void CollectLibFiles(string baseDir, string dir, bool isX64, bool isLlvm = false
 }
 Console.WriteLine();
 
-// Collect bin files
+/********************************************************************************
+ * 
+ * Collect bin files
+ * 
+ ********************************************************************************/
+
 var binFiles = new List<MyFile>();
 var binDirs = new List<MyFile>();
 bool hasEnglish = Directory.Exists(Path.Combine(msvcSDKPath, @"bin\Hostx64\x86\1033"));
@@ -99,21 +184,26 @@ void CollectBinFiles(string baseDir, string dir, bool? isX64, bool isLlvm, strin
 	if (addDir) {
 		var relDir = Path.GetRelativePath(baseDir, dir);
 		binDirs.Add(new MyFile(dir, relDir, isX64, isLlvm));
-		Console.WriteLine($"Bin(x64:{isX64},llvm:{isLlvm}): {relDir} ({string.Join(',', onlyFiles)})");
+		Console.WriteLine($"Bin(x64:{isX64},llvm:{isLlvm}): {relDir} ({string.Join(',', onlyFiles!)})");
 	}
 }
 Console.WriteLine();
 
-// Copy files
-var cppSDKsRoot = Path.GetFullPath($"MSVC-{vsProps["installationVersion"]}");
-if (Directory.Exists(cppSDKsRoot))
-	Console.Error.WriteLine($"'{cppSDKsRoot}' already exists.");
-Console.WriteLine($"Copying files to '{cppSDKsRoot}'.");
-Directory.CreateDirectory(cppSDKsRoot);
+/********************************************************************************
+ * 
+ * Create MSVC toolset environment files
+ * 
+ ********************************************************************************/
+
+var msvcSDKsRoot = Path.GetFullPath($"MSVC-{msvcSDKVer}");
+if (Directory.Exists(msvcSDKsRoot))
+	Console.Error.WriteLine($"'{msvcSDKsRoot}' already exists.");
+Console.WriteLine($"Copying files to '{msvcSDKsRoot}'.");
+Directory.CreateDirectory(msvcSDKsRoot);
 var files = includeFiles.Concat(libFiles).Concat(binFiles).ToArray();
 var dirs = includeDirs.Concat(libDirs).Concat(binDirs).ToArray();
 int maxRelPathLen = files.Concat(dirs).Select(t => t.RelPath.Length).Max();
-File.WriteAllLines(Path.Combine(cppSDKsRoot, "filelist.txt"), dirs.Concat(files).Select(t => $"{t.RelPath.PadRight(maxRelPathLen)} : {t.Path}"));
+File.WriteAllLines(Path.Combine(msvcSDKsRoot, "filelist.txt"), dirs.Concat(files).Select(t => $"{t.RelPath.PadRight(maxRelPathLen)} : {t.Path}"));
 WriteEnvX86AndX64("clang-cl", true);
 WriteEnvX86AndX64("lld-link", true);
 WriteEnvX86AndX64("cl", false);
@@ -131,13 +221,13 @@ void WriteEnv(string tool, bool isX64, bool isLlvm) {
 	if (isLlvm && !isX64) {
 		// TODO: a bug in LLVM. If the header file of clang is included, the word x64 cannot appear in the path of clang-cl.exe. Otherwise, the uintptr_t will not be defined.
 		// Workaound: remove clang haders or copy clang-cl.exe to another directory
-        // see: https://developercommunity.visualstudio.com/t/clang-x64-on-x86-build-unknown-type-name-uintptr-t/1224638
+		// see: https://developercommunity.visualstudio.com/t/clang-x64-on-x86-build-unknown-type-name-uintptr-t/1224638
 		includeDirs2 = [.. includeDirs2.Where(t => !t.RelPath.Contains(@"VC\Tools\Llvm\lib\clang\"))];
 	}
 	AddDirs(includeDirs2, "INCLUDE", isX64, isLlvm);
 	AddDirs(libDirs, "LIB", isX64, isLlvm);
 	AddDirs(binDirs, "Path", isX64, isLlvm);
-	File.WriteAllText(Path.Combine(cppSDKsRoot, $"{tool}-{(isX64 ? "x64" : "x86")}.env"), env.ToString());
+	File.WriteAllText(Path.Combine(msvcSDKsRoot, $"{tool}-{(isX64 ? "x64" : "x86")}.env"), env.ToString());
 
 	void AddDirs(List<MyFile> dirs, string envName, bool isX64, bool isLlvm) {
 		if (isLlvm) {
@@ -152,15 +242,28 @@ void WriteEnv(string tool, bool isX64, bool isLlvm) {
 			env.AppendLine($"{envName}:.\\{dir.RelPath}");
 	}
 }
+
+/********************************************************************************
+ * 
+ * Copy files
+ * 
+ ********************************************************************************/
+
 files.AsParallel().ForAll(file => {
-	var destPath = Path.Combine(cppSDKsRoot, file.RelPath);
-	Directory.CreateDirectory(Path.GetDirectoryName(destPath));
+	var destPath = Path.Combine(msvcSDKsRoot, file.RelPath);
+	Directory.CreateDirectory(Path.GetDirectoryName(destPath) ?? throw new InvalidOperationException($"Can't get directory of '{destPath}'"));
 	File.Copy(file.Path, destPath, true);
 });
 Console.WriteLine("Done.");
 Console.WriteLine();
 
-JsonArray GetVsPropsList() {
+/********************************************************************************
+ * 
+ * Miscellanea
+ * 
+ ********************************************************************************/
+
+(MyVersion Ver, string Dir)[] GetVsInsts() {
 	using var process = Process.Start(new ProcessStartInfo(VsWherePath, "/format json /utf8") {
 		CreateNoWindow = true,
 		RedirectStandardOutput = true,
@@ -169,7 +272,11 @@ JsonArray GetVsPropsList() {
 	});
 	process!.WaitForExit();
 	var stdout = process.StandardOutput.ReadToEnd();
-	return (JsonNode.Parse(stdout) as JsonArray) ?? throw new InvalidOperationException("Can't parse vswhere stdout.");
+	var vsPropsJson = (JsonNode.Parse(stdout) as JsonArray) ?? throw new InvalidOperationException("Can't parse vswhere stdout.");
+	return [.. vsPropsJson.Select(t => (
+		MyVersion.Parse((string?)t?["installationVersion"] ?? throw new InvalidOperationException("Can't get installationVersion.")),
+		(string?)t?["installationPath"] ?? throw new InvalidOperationException("Can't get installationPath."))
+	)];
 }
 
 (MyVersion Ver, string Dir)[] GetWinSDKs() {
@@ -218,7 +325,7 @@ JsonArray GetVsPropsList() {
 	return [.. list];
 }
 
-static IEnumerable<string> CollectFiles(string dir, Predicate<string> onSubDir = null, Predicate<string> onFile = null) {
+static IEnumerable<string> CollectFiles(string dir, Predicate<string>? onSubDir = null, Predicate<string>? onFile = null) {
 	foreach (var file in Directory.EnumerateFiles(dir)) {
 		if (onFile is null || onFile(file))
 			yield return file;
@@ -240,7 +347,7 @@ static string[] GetImports(string filePath) {
 		int oldCount = imports.Count;
 		foreach (var node in imports.Where(t => !visited.Contains(t)).ToArray()) {
 			visited.Add(node);
-			var nodePath = Path.Combine(Path.GetDirectoryName(filePath), node);
+			var nodePath = Path.Combine(Path.GetDirectoryName(filePath) ?? throw new InvalidOperationException($"Can't get directory of '{filePath}'"), node);
 			if (!File.Exists(nodePath))
 				continue;
 			imports.UnionWith(GetOneImports(nodePath));
@@ -263,15 +370,19 @@ record MyFile(string Path, string RelPath, bool? IsX64, bool IsLlvm);
 class MyVersion : IComparable<MyVersion> {
 	readonly string s;
 	readonly int majorVer;
-	readonly Version ver;
+	readonly Version? ver;
 
-	MyVersion(string s, int majorVer, Version ver) {
+	MyVersion(string s, int majorVer, Version? ver) {
 		this.s = s;
 		this.majorVer = majorVer;
 		this.ver = ver;
 	}
 
-	public static bool TryParse(string s, out MyVersion result) {
+	public static MyVersion Parse(string s) {
+		return TryParse(s, out var result) ? result : throw new FormatException($"Invalid version: {s}");
+	}
+
+	public static bool TryParse([NotNullWhen(true)] string? s, [NotNullWhen(true)] out MyVersion? result) {
 		if (int.TryParse(s, out int majorVer)) {
 			result = new MyVersion(s, majorVer, null);
 			return true;
@@ -284,7 +395,7 @@ class MyVersion : IComparable<MyVersion> {
 		return false;
 	}
 
-	public int CompareTo(MyVersion other) {
+	public int CompareTo(MyVersion? other) {
 		if (ReferenceEquals(this, other))
 			return 0;
 		if (other is null)
