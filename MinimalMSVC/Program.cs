@@ -1,0 +1,302 @@
+#nullable disable
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.IO.MemoryMappedFiles;
+using System.Linq;
+using System.Text;
+using System.Text.Json.Nodes;
+using FlexPE;
+
+var ProgramFilesX86Root = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+var VsWherePath = Path.Combine(ProgramFilesX86Root, @"Microsoft Visual Studio\Installer\vswhere.exe");
+var VsRoot = string.Empty;
+var WindowsSDKRoot = Path.Combine(ProgramFilesX86Root, "Windows Kits");
+var NetFxSDKRoot = Path.Combine(ProgramFilesX86Root, @"Windows Kits\NETFXSDK");
+var LlvmSDKRoot = string.Empty;
+var MSVCSDKRoot = string.Empty;
+
+// Get installed Visual Studio and Windows SDK
+var vsProps = GetVsPropsList().OrderByDescending(t => Version.Parse((string)t["installationVersion"])).First();
+VsRoot = (string)vsProps["installationPath"];
+Console.WriteLine($"Found Visual Studio v{vsProps["installationVersion"]} at '{VsRoot}'.");
+LlvmSDKRoot = Path.Combine(VsRoot, @"VC\Tools\Llvm");
+var (llvmSDKVer, llvmSDKPath) = GetLlvmSDKs().OrderByDescending(t => t.Ver).First();
+Console.WriteLine($"Found LLVM Toolset v{llvmSDKVer} at '{llvmSDKPath}'.");
+MSVCSDKRoot = Path.Combine(VsRoot, @"VC\Tools\MSVC");
+var (msvcSDKVer, msvcSDKPath) = GetMSVCSDKs().OrderByDescending(t => t.Ver).First();
+Console.WriteLine($"Found MSVC Toolset v{msvcSDKVer} at '{msvcSDKPath}'.");
+var (winSDKVer, winSDKPath) = GetWinSDKs().OrderByDescending(t => t.Ver).First();
+Console.WriteLine($"Found Windows SDK v{winSDKVer} at '{winSDKPath}'.");
+var (netFxSDKVer, netFxSDKPath) = GetNetFxSDKs().OrderByDescending(t => t.Ver).First();
+Console.WriteLine($"Found .NET Framework SDK v{netFxSDKVer} at '{netFxSDKPath}'.");
+Console.WriteLine();
+
+// Collect include files
+var includeFiles = new List<MyFile>();
+var includeDirs = new List<MyFile>();
+CollectIncludeFiles(VsRoot, Path.Combine(llvmSDKPath, $@"lib\clang\{llvmSDKVer}\include"), false, true);
+CollectIncludeFiles(VsRoot, Path.Combine(llvmSDKPath, $@"x64\lib\clang\{llvmSDKVer}\include"), true, true);
+CollectIncludeFiles(VsRoot, Path.Combine(msvcSDKPath, "include"));
+CollectIncludeFiles(VsRoot, Path.Combine(msvcSDKPath, @"atlmfc\include"));
+CollectIncludeFiles(ProgramFilesX86Root, Path.Combine(winSDKPath, $@"Include\{winSDKVer}\ucrt"));
+CollectIncludeFiles(ProgramFilesX86Root, Path.Combine(winSDKPath, $@"Include\{winSDKVer}\um"));
+CollectIncludeFiles(ProgramFilesX86Root, Path.Combine(winSDKPath, $@"Include\{winSDKVer}\shared"));
+CollectIncludeFiles(ProgramFilesX86Root, Path.Combine(netFxSDKPath, @"Include\um"));
+void CollectIncludeFiles(string baseDir, string dir, bool? isX64 = null, bool isLlvm = false) {
+	Console.WriteLine($"Collecting include files in '{dir}'.");
+	includeFiles.AddRange(CollectFiles(dir).Select(t => new MyFile(t, Path.GetRelativePath(baseDir, t), isX64, isLlvm)));
+	var relDir = Path.GetRelativePath(baseDir, dir);
+	includeDirs.Add(new MyFile(dir, relDir, isX64, isLlvm));
+	Console.WriteLine($"Inlcude(x64:{isX64},llvm:{isLlvm}): {relDir}");
+}
+Console.WriteLine();
+
+// Collect lib files
+var libFiles = new List<MyFile>();
+var libDirs = new List<MyFile>();
+CollectLibFilesX86AndX64(VsRoot, Path.Combine(msvcSDKPath, "lib"));
+CollectLibFilesX86AndX64(VsRoot, Path.Combine(msvcSDKPath, @"atlmfc\lib"));
+CollectLibFilesX86AndX64(ProgramFilesX86Root, Path.Combine(winSDKPath, $@"Lib\{winSDKVer}\ucrt"));
+CollectLibFilesX86AndX64(ProgramFilesX86Root, Path.Combine(winSDKPath, $@"Lib\{winSDKVer}\um"));
+CollectLibFilesX86AndX64(ProgramFilesX86Root, Path.Combine(netFxSDKPath, @"Lib\um"));
+void CollectLibFilesX86AndX64(string baseDir, string dir) {
+	CollectLibFiles(baseDir, Path.Combine(dir, "x86"), false);
+	CollectLibFiles(baseDir, Path.Combine(dir, "x64"), true);
+}
+void CollectLibFiles(string baseDir, string dir, bool isX64, bool isLlvm = false) {
+	Console.WriteLine($"Collecting lib files in '{dir}'.");
+	libFiles.AddRange(CollectFiles(dir, onSubDir: _ => false, onFile: path => !path.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase)).Select(t => new MyFile(t, Path.GetRelativePath(baseDir, t), isX64, isLlvm)));
+	var relDir = Path.GetRelativePath(baseDir, dir);
+	libDirs.Add(new MyFile(dir, relDir, isX64, isLlvm));
+	Console.WriteLine($"Lib(x64:{isX64},llvm:{isLlvm}): {relDir}");
+}
+Console.WriteLine();
+
+// Collect bin files
+var binFiles = new List<MyFile>();
+var binDirs = new List<MyFile>();
+bool hasEnglish = Directory.Exists(Path.Combine(msvcSDKPath, @"bin\Hostx64\x86\1033"));
+string[] msvcFileList = ["cl.exe", "c1xx.dll", "c2.dll", "link.exe", "mspdb80.dll", "mspdb90.dll", "mspdb100.dll", "mspdb110.dll", "mspdb120.dll", "mspdb140.dll", "mspdbcore.dll", "msobj80.dll", "msobj90.dll", "msobj100.dll", "msobj110.dll", "msobj120.dll", "msobj140.dll", "cvtres.exe"];
+CollectBinFiles(VsRoot, Path.Combine(llvmSDKPath, @"x64\bin"), null, true, ["clang-cl.exe", "lld-link.exe"]);
+CollectBinFiles(VsRoot, Path.Combine(msvcSDKPath, @"bin\Hostx64\x86"), false, false, msvcFileList);
+CollectBinFiles(VsRoot, Path.Combine(msvcSDKPath, hasEnglish ? @"bin\Hostx64\x86\1033" : @"bin\Hostx64\x86\2052"), false, false, ["clui.dll"], false);
+CollectBinFiles(VsRoot, Path.Combine(msvcSDKPath, @"bin\Hostx64\x64"), true, false, msvcFileList);
+CollectBinFiles(VsRoot, Path.Combine(msvcSDKPath, hasEnglish ? @"bin\Hostx64\x64\1033" : @"bin\Hostx64\x64\2052"), true, false, ["clui.dll"], false);
+CollectBinFiles(ProgramFilesX86Root, Path.Combine(winSDKPath, $@"bin\{winSDKVer}\x86"), false, false, ["rc.exe"]);
+CollectBinFiles(ProgramFilesX86Root, Path.Combine(winSDKPath, $@"bin\{winSDKVer}\x64"), true, false, ["rc.exe"]);
+void CollectBinFiles(string baseDir, string dir, bool? isX64, bool isLlvm, string[] onlyFiles, bool addDir = true) {
+	Console.WriteLine($"Collecting bin files in '{dir}'.");
+	if (onlyFiles is not null) {
+		var imports = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		imports.UnionWith(onlyFiles);
+		foreach (var onlyFile in onlyFiles)
+			imports.UnionWith(GetImports(Path.Combine(dir, onlyFile)));
+		onlyFiles = [.. imports.Where(t => File.Exists(Path.Combine(dir, t)))];
+	}
+	binFiles.AddRange(CollectFiles(dir, onSubDir: _ => false, onFile: path => onlyFiles is null || onlyFiles.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)).Select(t => new MyFile(t, Path.GetRelativePath(baseDir, t), isX64, isLlvm)));
+	if (addDir) {
+		var relDir = Path.GetRelativePath(baseDir, dir);
+		binDirs.Add(new MyFile(dir, relDir, isX64, isLlvm));
+		Console.WriteLine($"Bin(x64:{isX64},llvm:{isLlvm}): {relDir} ({string.Join(',', onlyFiles)})");
+	}
+}
+Console.WriteLine();
+
+// Copy files
+var cppSDKsRoot = Path.GetFullPath($"MSVC-{vsProps["installationVersion"]}");
+if (Directory.Exists(cppSDKsRoot))
+	Console.Error.WriteLine($"'{cppSDKsRoot}' already exists.");
+Console.WriteLine($"Copying files to '{cppSDKsRoot}'.");
+Directory.CreateDirectory(cppSDKsRoot);
+var files = includeFiles.Concat(libFiles).Concat(binFiles).ToArray();
+var dirs = includeDirs.Concat(libDirs).Concat(binDirs).ToArray();
+int maxRelPathLen = files.Concat(dirs).Select(t => t.RelPath.Length).Max();
+File.WriteAllLines(Path.Combine(cppSDKsRoot, "filelist.txt"), dirs.Concat(files).Select(t => $"{t.RelPath.PadRight(maxRelPathLen)} : {t.Path}"));
+WriteEnvX86AndX64("clang-cl", true);
+WriteEnvX86AndX64("lld-link", true);
+WriteEnvX86AndX64("cl", false);
+WriteEnvX86AndX64("link", false);
+WriteEnvX86AndX64("rc", false);
+void WriteEnvX86AndX64(string tool, bool isLlvm) {
+	WriteEnv(tool, false, isLlvm);
+	WriteEnv(tool, true, isLlvm);
+}
+void WriteEnv(string tool, bool isX64, bool isLlvm) {
+	var toolPath = binFiles.Single(t => Path.GetFileNameWithoutExtension(t.Path).Equals(tool, StringComparison.OrdinalIgnoreCase) && (t.IsX64 is null || t.IsX64.Value == isX64) && t.IsLlvm == isLlvm);
+	var env = new StringBuilder();
+	env.AppendLine(toolPath.RelPath);
+	var includeDirs2 = includeDirs;
+	if (isLlvm && !isX64) {
+		// TODO: a bug in LLVM. If the header file of clang is included, the word x64 cannot appear in the path of clang-cl.exe. Otherwise, the uintptr_t will not be defined.
+		// Workaound: remove clang haders or copy clang-cl.exe to another directory
+        // see: https://developercommunity.visualstudio.com/t/clang-x64-on-x86-build-unknown-type-name-uintptr-t/1224638
+		includeDirs2 = [.. includeDirs2.Where(t => !t.RelPath.Contains(@"VC\Tools\Llvm\lib\clang\"))];
+	}
+	AddDirs(includeDirs2, "INCLUDE", isX64, isLlvm);
+	AddDirs(libDirs, "LIB", isX64, isLlvm);
+	AddDirs(binDirs, "Path", isX64, isLlvm);
+	File.WriteAllText(Path.Combine(cppSDKsRoot, $"{tool}-{(isX64 ? "x64" : "x86")}.env"), env.ToString());
+
+	void AddDirs(List<MyFile> dirs, string envName, bool isX64, bool isLlvm) {
+		if (isLlvm) {
+			foreach (var dir in dirs.Where(t => t.IsX64 == isX64 && t.IsLlvm))
+				env.AppendLine($"{envName}:.\\{dir.RelPath}");
+			foreach (var dir in dirs.Where(t => t.IsX64 is null && t.IsLlvm))
+				env.AppendLine($"{envName}:.\\{dir.RelPath}");
+		}
+		foreach (var dir in dirs.Where(t => t.IsX64 == isX64 && !t.IsLlvm))
+			env.AppendLine($"{envName}:.\\{dir.RelPath}");
+		foreach (var dir in dirs.Where(t => t.IsX64 is null && !t.IsLlvm))
+			env.AppendLine($"{envName}:.\\{dir.RelPath}");
+	}
+}
+files.AsParallel().ForAll(file => {
+	var destPath = Path.Combine(cppSDKsRoot, file.RelPath);
+	Directory.CreateDirectory(Path.GetDirectoryName(destPath));
+	File.Copy(file.Path, destPath, true);
+});
+Console.WriteLine("Done.");
+Console.WriteLine();
+
+JsonArray GetVsPropsList() {
+	using var process = Process.Start(new ProcessStartInfo(VsWherePath, "/format json /utf8") {
+		CreateNoWindow = true,
+		RedirectStandardOutput = true,
+		StandardOutputEncoding = Encoding.UTF8,
+		UseShellExecute = false
+	});
+	process!.WaitForExit();
+	var stdout = process.StandardOutput.ReadToEnd();
+	return (JsonNode.Parse(stdout) as JsonArray) ?? throw new InvalidOperationException("Can't parse vswhere stdout.");
+}
+
+(MyVersion Ver, string Dir)[] GetWinSDKs() {
+	var list = new List<(MyVersion, string)>();
+	foreach (var dir in Directory.EnumerateDirectories(WindowsSDKRoot)) {
+		if (!MyVersion.TryParse(Path.GetFileName(dir), out _))
+			continue;
+		if (!Directory.Exists(Path.Combine(dir, "Include")))
+			continue;
+		foreach (var incDir in Directory.EnumerateDirectories(Path.Combine(dir, "Include"))) {
+			if (!MyVersion.TryParse(Path.GetFileName(incDir), out var ver))
+				continue;
+			list.Add((ver, dir));
+		}
+	}
+	return [.. list];
+}
+
+(MyVersion Ver, string Dir)[] GetNetFxSDKs() {
+	var list = new List<(MyVersion, string)>();
+	foreach (var dir in Directory.EnumerateDirectories(NetFxSDKRoot)) {
+		if (!MyVersion.TryParse(Path.GetFileName(dir), out var ver))
+			continue;
+		list.Add((ver, dir));
+	}
+	return [.. list];
+}
+
+(MyVersion Ver, string Dir)[] GetLlvmSDKs() {
+	var list = new List<(MyVersion, string)>();
+	foreach (var dir in Directory.EnumerateDirectories(Path.Combine(LlvmSDKRoot, @"lib\clang"))) {
+		if (!MyVersion.TryParse(Path.GetFileName(dir), out var ver))
+			continue;
+		list.Add((ver, LlvmSDKRoot));
+	}
+	return [.. list];
+}
+
+(MyVersion Ver, string Dir)[] GetMSVCSDKs() {
+	var list = new List<(MyVersion, string)>();
+	foreach (var dir in Directory.EnumerateDirectories(MSVCSDKRoot)) {
+		if (!MyVersion.TryParse(Path.GetFileName(dir), out var ver))
+			continue;
+		list.Add((ver, dir));
+	}
+	return [.. list];
+}
+
+static IEnumerable<string> CollectFiles(string dir, Predicate<string> onSubDir = null, Predicate<string> onFile = null) {
+	foreach (var file in Directory.EnumerateFiles(dir)) {
+		if (onFile is null || onFile(file))
+			yield return file;
+	}
+	foreach (var subDir in Directory.EnumerateDirectories(dir)) {
+		if (onSubDir is not null && !onSubDir(subDir))
+			continue;
+		foreach (var file in CollectFiles(subDir, onSubDir, onFile))
+			yield return file;
+	}
+}
+
+static string[] GetImports(string filePath) {
+	if (!File.Exists(filePath))
+		return [];
+	var visited = new HashSet<string>(StringComparer.Ordinal) { Path.GetFileName(filePath) };
+	var imports = GetOneImports(filePath).ToHashSet(StringComparer.Ordinal);
+	while (true) {
+		int oldCount = imports.Count;
+		foreach (var node in imports.Where(t => !visited.Contains(t)).ToArray()) {
+			visited.Add(node);
+			var nodePath = Path.Combine(Path.GetDirectoryName(filePath), node);
+			if (!File.Exists(nodePath))
+				continue;
+			imports.UnionWith(GetOneImports(nodePath));
+		}
+		if (oldCount == imports.Count)
+			break;
+	}
+	return [.. imports];
+}
+
+unsafe static string[] GetOneImports(string filePath) {
+	using var fileMapping = MemoryMappedFile.CreateFromFile(filePath, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
+	using var accessor = fileMapping.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+	var peImage = new PEImage((byte*)accessor.SafeMemoryMappedViewHandle.DangerousGetHandle());
+	return [.. peImage.ImportDirectory.ImportView.Select(t => t.Name.ReadAsciiString())];
+}
+
+record MyFile(string Path, string RelPath, bool? IsX64, bool IsLlvm);
+
+class MyVersion : IComparable<MyVersion> {
+	readonly string s;
+	readonly int majorVer;
+	readonly Version ver;
+
+	MyVersion(string s, int majorVer, Version ver) {
+		this.s = s;
+		this.majorVer = majorVer;
+		this.ver = ver;
+	}
+
+	public static bool TryParse(string s, out MyVersion result) {
+		if (int.TryParse(s, out int majorVer)) {
+			result = new MyVersion(s, majorVer, null);
+			return true;
+		}
+		if (Version.TryParse(s, out var ver)) {
+			result = new MyVersion(s, 0, ver);
+			return true;
+		}
+		result = default;
+		return false;
+	}
+
+	public int CompareTo(MyVersion other) {
+		if (ReferenceEquals(this, other))
+			return 0;
+		if (other is null)
+			return 1;
+		return ToVersion().CompareTo(other.ToVersion());
+	}
+
+	Version ToVersion() {
+		return ver ?? new Version(majorVer, 0);
+	}
+
+	public override string ToString() {
+		return s;
+	}
+}
