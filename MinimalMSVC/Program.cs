@@ -164,7 +164,8 @@ var binFiles = new List<MyFile>();
 var binDirs = new List<MyFile>();
 bool hasEnglish = Directory.Exists(Path.Combine(msvcSDKPath, @"bin\Hostx64\x86\1033"));
 string[] msvcFileList = ["cl.exe", "c1xx.dll", "c2.dll", "link.exe", "mspdb80.dll", "mspdb90.dll", "mspdb100.dll", "mspdb110.dll", "mspdb120.dll", "mspdb140.dll", "mspdbcore.dll", "msobj80.dll", "msobj90.dll", "msobj100.dll", "msobj110.dll", "msobj120.dll", "msobj140.dll", "cvtres.exe"];
-CollectBinFiles(VsRoot, Path.Combine(llvmSDKPath, @"x64\bin"), null, true, ["clang-cl.exe", "lld-link.exe"]);
+CollectBinFiles(VsRoot, Path.Combine(llvmSDKPath, @"bin"), false, true, ["clang-cl.exe", "lld-link.exe"]);
+CollectBinFiles(VsRoot, Path.Combine(llvmSDKPath, @"x64\bin"), true, true, ["clang-cl.exe", "lld-link.exe"]);
 CollectBinFiles(VsRoot, Path.Combine(msvcSDKPath, @"bin\Hostx64\x86"), false, false, msvcFileList);
 CollectBinFiles(VsRoot, Path.Combine(msvcSDKPath, hasEnglish ? @"bin\Hostx64\x86\1033" : @"bin\Hostx64\x86\2052"), false, false, ["clui.dll"], false);
 CollectBinFiles(VsRoot, Path.Combine(msvcSDKPath, @"bin\Hostx64\x64"), true, false, msvcFileList);
@@ -173,14 +174,27 @@ CollectBinFiles(ProgramFilesX86Root, Path.Combine(winSDKPath, $@"bin\{winSDKVer}
 CollectBinFiles(ProgramFilesX86Root, Path.Combine(winSDKPath, $@"bin\{winSDKVer}\x64"), true, false, ["rc.exe"]);
 void CollectBinFiles(string baseDir, string dir, bool? isX64, bool isLlvm, string[] onlyFiles, bool addDir = true) {
 	Console.WriteLine($"Collecting bin files in '{dir}'.");
+	var dir2 = dir;
+	if (isLlvm && isX64 == false) {
+		// Re-use x64 bin files for x86 llvm.
+		// We must copy the files to the x86 directory otherwise clang-cl will not work, see: https://developercommunity.visualstudio.com/t/clang-x64-on-x86-build-unknown-type-name-uintptr-t/1224638
+		dir2 = dir.Replace(@"\bin", @"\x64\bin");
+	}
 	if (onlyFiles is not null) {
 		var imports = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		imports.UnionWith(onlyFiles);
 		foreach (var onlyFile in onlyFiles)
-			imports.UnionWith(GetImports(Path.Combine(dir, onlyFile)));
-		onlyFiles = [.. imports.Where(t => File.Exists(Path.Combine(dir, t)))];
+			imports.UnionWith(GetImports(Path.Combine(dir2, onlyFile)));
+		onlyFiles = [.. imports.Where(t => File.Exists(Path.Combine(dir2, t)))];
 	}
-	binFiles.AddRange(CollectFiles(dir, onSubDir: _ => false, onFile: path => onlyFiles is null || onlyFiles.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)).Select(t => new MyFile(t, Path.GetRelativePath(baseDir, t), isX64, isLlvm)));
+	var binFilePaths = CollectFiles(dir2, onSubDir: _ => false,
+		onFile: path => onlyFiles is null || onlyFiles.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)).ToArray();
+	binFiles.AddRange(binFilePaths.Select(t => {
+		var relPath = Path.GetRelativePath(baseDir, t);
+		if (isLlvm && isX64 == false)
+			relPath = relPath.Replace(@"\x64\bin", @"\bin");
+		return new MyFile(t, relPath, isX64, isLlvm);
+	}));
 	if (addDir) {
 		var relDir = Path.GetRelativePath(baseDir, dir);
 		binDirs.Add(new MyFile(dir, relDir, isX64, isLlvm));
@@ -204,43 +218,68 @@ var files = includeFiles.Concat(libFiles).Concat(binFiles).ToArray();
 var dirs = includeDirs.Concat(libDirs).Concat(binDirs).ToArray();
 int maxRelPathLen = files.Concat(dirs).Select(t => t.RelPath.Length).Max();
 File.WriteAllLines(Path.Combine(msvcSDKsRoot, "filelist.txt"), dirs.Concat(files).Select(t => $"{t.RelPath.PadRight(maxRelPathLen)} : {t.Path}"));
-WriteEnvX86AndX64("clang-cl", true);
-WriteEnvX86AndX64("lld-link", true);
-WriteEnvX86AndX64("cl", false);
-WriteEnvX86AndX64("link", false);
-WriteEnvX86AndX64("rc", false);
-void WriteEnvX86AndX64(string tool, bool isLlvm) {
-	WriteEnv(tool, false, isLlvm);
-	WriteEnv(tool, true, isLlvm);
+CollectEnvX86AndX64("clang-cl", true, WriteEnvAndBat);
+CollectEnvX86AndX64("lld-link", true, WriteEnvAndBat);
+CollectEnvX86AndX64("cl", false, WriteEnvAndBat);
+CollectEnvX86AndX64("link", false, WriteEnvAndBat);
+CollectEnvX86AndX64("rc", false, WriteEnvAndBat);
+void CollectEnvX86AndX64(string tool, bool isLlvm, CollectEnvCallback callback) {
+	CollectEnv(tool, false, isLlvm, callback);
+	CollectEnv(tool, true, isLlvm, callback);
 }
-void WriteEnv(string tool, bool isX64, bool isLlvm) {
+void CollectEnv(string tool, bool isX64, bool isLlvm, CollectEnvCallback callback) {
 	var toolPath = binFiles.Single(t => Path.GetFileNameWithoutExtension(t.Path).Equals(tool, StringComparison.OrdinalIgnoreCase) && (t.IsX64 is null || t.IsX64.Value == isX64) && t.IsLlvm == isLlvm);
-	var env = new StringBuilder();
-	env.AppendLine(toolPath.RelPath);
-	var includeDirs2 = includeDirs;
-	if (isLlvm && !isX64) {
-		// TODO: a bug in LLVM. If the header file of clang is included, the word x64 cannot appear in the path of clang-cl.exe. Otherwise, the uintptr_t will not be defined.
-		// Workaound: remove clang haders or copy clang-cl.exe to another directory
-		// see: https://developercommunity.visualstudio.com/t/clang-x64-on-x86-build-unknown-type-name-uintptr-t/1224638
-		includeDirs2 = [.. includeDirs2.Where(t => !t.RelPath.Contains(@"VC\Tools\Llvm\lib\clang\"))];
-	}
-	AddDirs(includeDirs2, "INCLUDE", isX64, isLlvm);
-	AddDirs(libDirs, "LIB", isX64, isLlvm);
-	AddDirs(binDirs, "Path", isX64, isLlvm);
-	File.WriteAllText(Path.Combine(msvcSDKsRoot, $"{tool}-{(isX64 ? "x64" : "x86")}.env"), env.ToString());
+	var envs = new List<MyEnv>();
+	AddDirs(envs, includeDirs, "INCLUDE", isX64, isLlvm);
+	AddDirs(envs, libDirs, "LIB", isX64, isLlvm);
+	AddDirs(envs, binDirs, "Path", isX64, isLlvm);
+	callback(tool, isX64, isLlvm, toolPath, [.. envs]);
 
-	void AddDirs(List<MyFile> dirs, string envName, bool isX64, bool isLlvm) {
+	void AddDirs(List<MyEnv> envs, List<MyFile> dirs, string envName, bool isX64, bool isLlvm) {
 		if (isLlvm) {
 			foreach (var dir in dirs.Where(t => t.IsX64 == isX64 && t.IsLlvm))
-				env.AppendLine($"{envName}:.\\{dir.RelPath}");
+				envs.Add(new(envName, dir.RelPath, true));
 			foreach (var dir in dirs.Where(t => t.IsX64 is null && t.IsLlvm))
-				env.AppendLine($"{envName}:.\\{dir.RelPath}");
+				envs.Add(new(envName, dir.RelPath, true));
 		}
 		foreach (var dir in dirs.Where(t => t.IsX64 == isX64 && !t.IsLlvm))
-			env.AppendLine($"{envName}:.\\{dir.RelPath}");
+			envs.Add(new(envName, dir.RelPath, true));
 		foreach (var dir in dirs.Where(t => t.IsX64 is null && !t.IsLlvm))
-			env.AppendLine($"{envName}:.\\{dir.RelPath}");
+			envs.Add(new(envName, dir.RelPath, true));
 	}
+}
+void WriteEnvAndBat(string tool, bool isX64, bool isLlvm, MyFile toolPath, MyEnv[] envs) {
+	var env = new StringBuilder();
+	env.AppendLine(toolPath.RelPath);
+	foreach (var (name, value, isPath) in envs) {
+		if (isPath)
+			env.AppendLine($"{name}:.\\{value}");
+		else
+			env.AppendLine($"{name}:{value}");
+	}
+	File.WriteAllText(Path.Combine(msvcSDKsRoot, $"{tool}-{(isX64 ? "x64" : "x86")}.env"), env.ToString());
+
+	var bat = new StringBuilder();
+	bat.AppendLine("@echo off");
+	bat.AppendLine("setlocal");
+	bat.AppendLine("set \"CURRENT_DIR=%~dp0\"");
+	var sortedEnv = envs.GroupBy(t => t.Name).Select(t => (
+		Name: t.Key,
+		Values: t.Select(t => t.Value).Reverse().ToArray(),
+		t.First().IsPath
+	)).ToArray();
+	foreach (var (name, values, isPath) in sortedEnv) {
+		Debug.Assert(isPath || values.Length == 1, "The value of non-path environment variable must be unique.");
+		if (isPath) {
+			foreach (var value in values)
+				bat.AppendLine($"set \"{name}=%CURRENT_DIR%{value};%{name}%\"");
+		}
+		else {
+			bat.AppendLine($"set \"{name}={values[0]}\"");
+		}
+	}
+	bat.AppendLine($"\"%CURRENT_DIR%{toolPath.RelPath}\" %*");
+	File.WriteAllText(Path.Combine(msvcSDKsRoot, $"{tool}-{(isX64 ? "x64" : "x86")}.bat"), bat.ToString());
 }
 
 /********************************************************************************
@@ -364,6 +403,10 @@ unsafe static string[] GetOneImports(string filePath) {
 	var peImage = new PEImage((byte*)accessor.SafeMemoryMappedViewHandle.DangerousGetHandle());
 	return [.. peImage.ImportDirectory.ImportView.Select(t => t.Name.ReadAsciiString())];
 }
+
+record MyEnv(string Name, string Value, bool IsPath);
+
+delegate void CollectEnvCallback(string tool, bool isX64, bool isLlvm, MyFile toolPath, MyEnv[] envs);
 
 record MyFile(string Path, string RelPath, bool? IsX64, bool IsLlvm);
 
