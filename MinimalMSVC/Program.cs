@@ -174,27 +174,16 @@ CollectBinFiles(ProgramFilesX86Root, Path.Combine(winSDKPath, $@"bin\{winSDKVer}
 CollectBinFiles(ProgramFilesX86Root, Path.Combine(winSDKPath, $@"bin\{winSDKVer}\x64"), true, false, ["rc.exe"]);
 void CollectBinFiles(string baseDir, string dir, bool? isX64, bool isLlvm, string[] onlyFiles, bool addDir = true) {
 	Console.WriteLine($"Collecting bin files in '{dir}'.");
-	var dir2 = dir;
-	if (isLlvm && isX64 == false) {
-		// Re-use x64 bin files for x86 llvm.
-		// We must copy the files to the x86 directory otherwise clang-cl will not work, see: https://developercommunity.visualstudio.com/t/clang-x64-on-x86-build-unknown-type-name-uintptr-t/1224638
-		dir2 = dir.Replace(@"\bin", @"\x64\bin");
-	}
 	if (onlyFiles is not null) {
 		var imports = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		imports.UnionWith(onlyFiles);
 		foreach (var onlyFile in onlyFiles)
-			imports.UnionWith(GetImports(Path.Combine(dir2, onlyFile)));
-		onlyFiles = [.. imports.Where(t => File.Exists(Path.Combine(dir2, t)))];
+			imports.UnionWith(GetImports(Path.Combine(dir, onlyFile)));
+		onlyFiles = [.. imports.Where(t => File.Exists(Path.Combine(dir, t)))];
 	}
-	var binFilePaths = CollectFiles(dir2, onSubDir: _ => false,
+	var binFilePaths = CollectFiles(dir, onSubDir: _ => false,
 		onFile: path => onlyFiles is null || onlyFiles.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)).ToArray();
-	binFiles.AddRange(binFilePaths.Select(t => {
-		var relPath = Path.GetRelativePath(baseDir, t);
-		if (isLlvm && isX64 == false)
-			relPath = relPath.Replace(@"\x64\bin", @"\bin");
-		return new MyFile(t, relPath, isX64, isLlvm);
-	}));
+	binFiles.AddRange(binFilePaths.Select(t => new MyFile(t, Path.GetRelativePath(baseDir, t), isX64, isLlvm)));
 	if (addDir) {
 		var relDir = Path.GetRelativePath(baseDir, dir);
 		binDirs.Add(new MyFile(dir, relDir, isX64, isLlvm));
