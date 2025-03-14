@@ -169,7 +169,12 @@ Console.WriteLine();
 var binFiles = new List<MyFile>();
 var binDirs = new List<MyFile>();
 bool hasEnglish = Directory.Exists(Path.Combine(msvcSDKPath, @"bin\Hostx64\x86\1033"));
-string[] msvcFileList = ["cl.exe", "c1xx.dll", "c2.dll", "link.exe", "mspdb80.dll", "mspdb90.dll", "mspdb100.dll", "mspdb110.dll", "mspdb120.dll", "mspdb140.dll", "mspdbcore.dll", "msobj80.dll", "msobj90.dll", "msobj100.dll", "msobj110.dll", "msobj120.dll", "msobj140.dll", "cvtres.exe"];
+string[] msvcFileList = [
+	"cl.exe", "c1.dll", "c1xx.dll", "c2.dll", // C/C++ compiler
+	"link.exe", // Linker
+	"mspdb80.dll", "mspdb90.dll", "mspdb100.dll", "mspdb110.dll", "mspdb120.dll", "mspdb140.dll", "mspdbcore.dll", "msobj80.dll", "msobj90.dll", "msobj100.dll", "msobj110.dll", "msobj120.dll", "msobj140.dll",
+	"cvtres.exe" // Resource to COFF object converter
+];
 CollectBinFiles(VsRoot, Path.Combine(llvmSDKPath, @"bin"), false, true, ["clang-cl.exe", "lld-link.exe"]);
 CollectBinFiles(VsRoot, Path.Combine(llvmSDKPath, @"x64\bin"), true, true, ["clang-cl.exe", "lld-link.exe"]);
 CollectBinFiles(VsRoot, Path.Combine(msvcSDKPath, @"bin\Hostx64\x86"), false, false, msvcFileList);
@@ -234,7 +239,9 @@ void CollectEnvX86AndX64(string tool, bool isLlvm, CollectEnvCallback callback) 
 	CollectEnv(tool, true, isLlvm, callback);
 }
 void CollectEnv(string tool, bool isX64, bool isLlvm, CollectEnvCallback callback) {
-	var toolPath = binFiles.Single(t => Path.GetFileNameWithoutExtension(t.Path).Equals(tool, StringComparison.OrdinalIgnoreCase) && (t.IsX64 is null || t.IsX64.Value == isX64) && t.IsLlvm == isLlvm);
+	var toolPath = binFiles.Single(t =>
+		Path.GetFileNameWithoutExtension(t.Path).Equals(tool, StringComparison.OrdinalIgnoreCase) &&
+		(t.IsX64 is null || t.IsX64.Value == isX64) && t.IsLlvm == isLlvm);
 	var envs = new List<MyEnv>();
 	AddDirs(envs, includeDirs, "INCLUDE", isX64, isLlvm);
 	AddDirs(envs, libDirs, "LIB", isX64, isLlvm);
