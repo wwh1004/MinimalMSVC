@@ -1,0 +1,36 @@
+# This workflow will build a .NET project
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-net
+
+name: .NET
+
+on: 
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2019
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: "recursive"
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+    - name: Build MinimalMSVC
+      run: .\build.bat
+    - name: Run MinimalMSVC
+      working-directory: ./bin
+      run: .\MinimalMSVC.exe
+    - name: Package the MSVC SDK
+      working-directory: ./bin
+      shell: pwsh
+      run: |
+        $folder = Get-ChildItem -Path . -Filter "MSVC-*" | Select-Object -First 1 -ExpandProperty Name
+        cd $folder
+        7z a -t7z -mx9 -md=384m -mfb=273 -ms=on -mmt=off ..\$folder.zip *
+    - name: Upload the MSVC SDK
+      uses: actions/upload-artifact@v4
+      with:
+        name: MSVC
+        path: ./bin/MSVC-*.zip

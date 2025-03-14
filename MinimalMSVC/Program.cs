@@ -24,7 +24,6 @@ if (args.Any(t => t.Equals("-h", StringComparison.OrdinalIgnoreCase) || t.Equals
 			-vcv=<version> : MSVC version (default: latest)
 			-winv=<version> : Windows SDK version (default: latest)
 			-netv=<version> : .NET Framework SDK version (default: latest)
-		
 		""");
 	return;
 }
