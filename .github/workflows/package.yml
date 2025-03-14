@@ -5,23 +5,34 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2019
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2019,windows-2022]
+
+    runs-on: ${{ matrix.os }}
+
     steps:
     - uses: actions/checkout@v4
+
     - name: Build MinimalMSVC
       run: .\build.bat
+
     - name: Run MinimalMSVC
       working-directory: ./bin
       run: .\MinimalMSVC.exe
+
     - name: Package the MSVC SDK
       working-directory: ./bin
       shell: pwsh
       run: |
+        Remove-Item -Path *.7z -Force -ErrorAction Ignore
         $folder = Get-ChildItem -Path . -Filter "MSVC-*" | Select-Object -First 1 -ExpandProperty Name
         cd $folder
-        7z a -t7z -mx9 -md=384m -mfb=273 -ms=on -mmt=off ..\$folder.zip *
+        7z a -t7z -mx9 -md=384m -mfb=273 -ms=on -mmt=off ..\$folder.7z *
+
     - name: Upload the MSVC SDK
       uses: actions/upload-artifact@v4
       with:
-        name: MSVC
-        path: ./bin/MSVC-*.zip
+        name: MSVC-${{ matrix.os }}
+        path: ./bin/MSVC-*.7z
