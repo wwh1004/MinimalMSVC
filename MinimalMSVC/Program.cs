@@ -146,7 +146,11 @@ void CollectLibFilesX86AndX64(string baseDir, string dir) {
 }
 void CollectLibFiles(string baseDir, string dir, bool isX64, bool isLlvm = false) {
 	Console.WriteLine($"Collecting lib files in '{dir}'.");
-	libFiles.AddRange(CollectFiles(dir, onSubDir: _ => false, onFile: path => !path.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase)).Select(t => new MyFile(t, Path.GetRelativePath(baseDir, t), isX64, isLlvm)));
+	// Ignore *.pdb and msvcurt*.lib files.
+	// msvcurt*.lib are C runtime libraries for the /clr:pure option which take about 450MB space but the /clr:pure option was already deprecated.
+	var libFilePaths = CollectFiles(dir, onSubDir: _ => false,
+		onFile: path => !path.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase) && !Path.GetFileName(path).StartsWith("msvcurt", StringComparison.OrdinalIgnoreCase));
+	libFiles.AddRange(libFilePaths.Select(t => new MyFile(t, Path.GetRelativePath(baseDir, t), isX64, isLlvm)));
 	var relDir = Path.GetRelativePath(baseDir, dir);
 	libDirs.Add(new MyFile(dir, relDir, isX64, isLlvm));
 	Console.WriteLine($"Lib(x64:{isX64},llvm:{isLlvm}): {relDir}");
