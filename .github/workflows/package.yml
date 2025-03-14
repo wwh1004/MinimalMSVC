@@ -1,10 +1,12 @@
 name: Package
 
-on: 
+on:
+  schedule:
+    - cron: '0 0 */15 * *' # every 15 days
   workflow_dispatch:
 
 jobs:
-  build:
+  package:
     strategy:
       fail-fast: false
       matrix:
@@ -24,7 +26,6 @@ jobs:
 
     - name: Package the MSVC SDK
       working-directory: ./bin
-      shell: pwsh
       run: |
         Remove-Item -Path *.7z -Force -ErrorAction Ignore
         $folder = Get-ChildItem -Path . -Filter "MSVC-*" | Select-Object -First 1 -ExpandProperty Name
