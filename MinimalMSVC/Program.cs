@@ -146,10 +146,13 @@ void CollectLibFilesX86AndX64(string baseDir, string dir) {
 }
 void CollectLibFiles(string baseDir, string dir, bool isX64, bool isLlvm = false) {
 	Console.WriteLine($"Collecting lib files in '{dir}'.");
-	// Ignore *.pdb and msvcurt*.lib files.
-	// msvcurt*.lib are C runtime libraries for the /clr:pure option which take about 450MB space but the /clr:pure option was already deprecated.
+	// Ignore *.pdb, msvcurt*.lib and clang_rt.fuzzer*.lib files.
+	// msvcurt*.lib are C runtime libraries for the /clr:pure option which take about 500MB space but the /clr:pure option was already deprecated.
+	// clang_rt.fuzzer*.lib are fuzzer libraries which take about 400MB space and are not necessary for most users.
 	var libFilePaths = CollectFiles(dir, onSubDir: _ => false,
-		onFile: path => !path.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase) && !Path.GetFileName(path).StartsWith("msvcurt", StringComparison.OrdinalIgnoreCase));
+		onFile: path => !path.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase)
+			&& !Path.GetFileName(path).StartsWith("msvcurt", StringComparison.OrdinalIgnoreCase)
+			&& !Path.GetFileName(path).StartsWith("clang_rt.fuzzer", StringComparison.OrdinalIgnoreCase));
 	libFiles.AddRange(libFilePaths.Select(t => new MyFile(t, Path.GetRelativePath(baseDir, t), isX64, isLlvm)));
 	var relDir = Path.GetRelativePath(baseDir, dir);
 	libDirs.Add(new MyFile(dir, relDir, isX64, isLlvm));
