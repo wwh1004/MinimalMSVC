@@ -27,13 +27,13 @@ jobs:
     - name: Package the MSVC SDK
       working-directory: ./bin
       run: |
-        Remove-Item -Path *.7z -Force -ErrorAction Ignore
         $folder = Get-ChildItem -Path . -Filter "MSVC-*" | Select-Object -First 1 -ExpandProperty Name
+        echo "MSVC_NAME=$folder" >> $Env:GITHUB_ENV
         cd $folder
         7z a -t7z -mx9 -md=384m -mfb=273 -ms=on -mmt=off ..\$folder.7z *
 
     - name: Upload the MSVC SDK
       uses: actions/upload-artifact@v4
       with:
-        name: MSVC-${{ matrix.os }}
+        name: ${{ env.MSVC_NAME }}
         path: ./bin/MSVC-*.7z
